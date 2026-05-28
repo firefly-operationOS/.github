@@ -59,7 +59,7 @@ jobs:
                 <repositories>
                   <repository>
                     <id>github-firefly-operationos</id>
-                    <url>https://maven.pkg.github.com/firefly-operationOS/idp-backend-parent</url>
+                    <url>https://maven.pkg.github.com/firefly-operationos/idp-backend-parent</url>
                     <snapshots><enabled>true</enabled></snapshots>
                     <releases><enabled>true</enabled></releases>
                   </repository>
@@ -81,7 +81,9 @@ jobs:
       - name: Deploy
         run: |
           set -o pipefail
-          DEPLOY_REPO="-DaltDeploymentRepository=github-firefly-operationos::https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
+          # GitHub Packages Maven is case-sensitive on the owner segment; force lowercase.
+          LOWER_REPO=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          DEPLOY_REPO="-DaltDeploymentRepository=github-firefly-operationos::https://maven.pkg.github.com/${LOWER_REPO}"
           SKIP_FLAGS="-Dmaven.test.skip=true -DskipOpenApiGen"
 
           if [ -n "$DEPLOY_MODULE" ]; then

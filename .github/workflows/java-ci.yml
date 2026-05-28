@@ -61,7 +61,7 @@ jobs:
                 <repositories>
                   <repository>
                     <id>github-firefly-operationos</id>
-                    <url>https://maven.pkg.github.com/firefly-operationOS/idp-backend-parent</url>
+                    <url>https://maven.pkg.github.com/firefly-operationos/idp-backend-parent</url>
                     <snapshots><enabled>true</enabled></snapshots>
                     <releases><enabled>true</enabled></releases>
                   </repository>

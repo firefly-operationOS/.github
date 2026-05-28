@@ -100,11 +100,16 @@ jobs:
 
       - name: Build container image
         run: |
+          # Pass source repo URL as Maven property so the parent POM sets
+          # BP_OCI_SOURCE on the buildpack; this stamps org.opencontainers.image.source
+          # on the produced image and GHCR links the package to this repo on push.
+          LOWER_REPO=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
           mvn -B -pl "$WEB_MODULE" \
             spring-boot:build-image \
             -Pbuild-image \
             -Dmaven.test.skip=true \
-            -Ddocker.image.platform="$IMAGE_PLATFORM"
+            -Ddocker.image.platform="$IMAGE_PLATFORM" \
+            -Ddocker.image.source="https://github.com/${LOWER_REPO}"
 
       - name: Log in to GHCR
         # Use the org PAT (write:packages) because GITHUB_TOKEN cannot create

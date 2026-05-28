@@ -1,0 +1,99 @@
+name: Java CI
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        required: false
+        type: string
+        default: '25'
+      maven-goals:
+        description: 'Maven goals to run'
+        required: false
+        type: string
+        default: 'verify'
+      maven-args:
+        description: 'Additional Maven arguments'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    concurrency:
+      group: ci-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+
+      - name: Configure Maven repositories
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << 'EOF'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <servers>
+              <server>
+                <id>github-firefly-operationos</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.PACKAGES_TOKEN}</password>
+              </server>
+              <server>
+                <id>github-fireflyframework</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.PACKAGES_TOKEN}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>github-packages</id>
+                <repositories>
+                  <repository>
+                    <id>github-firefly-operationos</id>
+                    <url>https://maven.pkg.github.com/firefly-operationOS/idp-backend-parent</url>
+                    <snapshots><enabled>true</enabled></snapshots>
+                    <releases><enabled>true</enabled></releases>
+                  </repository>
+                  <repository>
+                    <id>github-fireflyframework</id>
+                    <url>https://maven.pkg.github.com/fireflyframework/fireflyframework-parent</url>
+                    <snapshots><enabled>true</enabled></snapshots>
+                    <releases><enabled>true</enabled></releases>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>github-packages</activeProfile>
+            </activeProfiles>
+          </settings>
+          EOF
+
+      - name: Build with Maven
+        env:
+          PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+          MAVEN_GOALS: ${{ inputs.maven-goals }}
+          MAVEN_ARGS: ${{ inputs.maven-args }}
+        run: mvn -B -U $MAVEN_GOALS $MAVEN_ARGS
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            **/target/surefire-reports/
+            **/target/failsafe-reports/
+          retention-days: 7
+          if-no-files-found: ignore

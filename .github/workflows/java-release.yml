@@ -1,0 +1,158 @@
+name: Java Release
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        required: false
+        type: string
+        default: '25'
+      deploy-module:
+        description: 'Specific module to deploy (e.g. core-idp-catalog-sdk). Leave empty to deploy the whole project.'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  github-packages:
+    runs-on: ubuntu-24.04-arm
+    concurrency:
+      group: release-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+      DEPLOY_MODULE: ${{ inputs.deploy-module }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+
+      - name: Configure Maven repositories
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << 'EOF'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <servers>
+              <server>
+                <id>github-firefly-operationos</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.PACKAGES_TOKEN}</password>
+              </server>
+              <server>
+                <id>github-fireflyframework</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.PACKAGES_TOKEN}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>github-packages</id>
+                <repositories>
+                  <repository>
+                    <id>github-firefly-operationos</id>
+                    <url>https://maven.pkg.github.com/firefly-operationOS/idp-backend-parent</url>
+                    <snapshots><enabled>true</enabled></snapshots>
+                    <releases><enabled>true</enabled></releases>
+                  </repository>
+                  <repository>
+                    <id>github-fireflyframework</id>
+                    <url>https://maven.pkg.github.com/fireflyframework/fireflyframework-parent</url>
+                    <snapshots><enabled>true</enabled></snapshots>
+                    <releases><enabled>true</enabled></releases>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>github-packages</activeProfile>
+            </activeProfiles>
+          </settings>
+          EOF
+
+      - name: Deploy
+        run: |
+          set -o pipefail
+          DEPLOY_REPO="-DaltDeploymentRepository=github-firefly-operationos::https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
+          SKIP_FLAGS="-Dmaven.test.skip=true -DskipOpenApiGen"
+
+          if [ -n "$DEPLOY_MODULE" ]; then
+            echo "Deploying single module: $DEPLOY_MODULE"
+            # Install dependencies first
+            mvn -B -U install $SKIP_FLAGS -pl "$DEPLOY_MODULE" -am 2>&1 | tail -5
+            # Deploy only the target module
+            mvn -B deploy $SKIP_FLAGS -pl "$DEPLOY_MODULE" $DEPLOY_REPO 2>&1 \
+              | tee /tmp/mvn-deploy.log || {
+                if grep -q "status code: 409" /tmp/mvn-deploy.log; then
+                  echo "::warning::Artifact already exists (409)"
+                else
+                  echo "::error::Deploy failed"
+                  exit 1
+                fi
+              }
+          else
+            echo "Deploying entire project"
+            mvn -B -U deploy $SKIP_FLAGS $DEPLOY_REPO 2>&1 \
+              | tee /tmp/mvn-deploy.log || {
+                if grep -q "status code: 409" /tmp/mvn-deploy.log \
+                   && [ -z "$(grep -i 'Failed to deploy' /tmp/mvn-deploy.log | grep -v '409' || true)" ]; then
+                  echo "::warning::Artifact already exists (409)"
+                else
+                  echo "::error::Deploy failed"
+                  exit 1
+                fi
+              }
+          fi
+
+  post-release:
+    needs: [github-packages]
+    if: always() && needs.github-packages.result == 'success'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep -m1 '<version>' pom.xml | sed 's/.*<version>//' | sed 's/<\/version>.*//' | xargs)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          TAG="v${VERSION}"
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          sleep 2
+          for ATTEMPT in 1 2 3; do
+            if gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --latest \
+              --target "$SHA" 2>/dev/null; then
+              echo "Release $TAG created successfully"
+              exit 0
+            fi
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG already exists — OK"
+              exit 0
+            fi
+            echo "Attempt $ATTEMPT failed, retrying in 3s..."
+            sleep 3
+          done
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — OK"
+          else
+            echo "::warning::Could not create release $TAG after 3 attempts"
+          fi

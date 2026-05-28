@@ -1,0 +1,138 @@
+name: Build Container Image
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        required: false
+        type: string
+        default: '25'
+      web-module:
+        description: 'Name of the -web module directory (e.g. core-idp-catalog-web)'
+        required: true
+        type: string
+      image-platform:
+        description: 'Target image platform'
+        required: false
+        type: string
+        default: 'linux/arm64'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: build-image-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+      WEB_MODULE: ${{ inputs.web-module }}
+      IMAGE_PLATFORM: ${{ inputs.image-platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+
+      - name: Configure Maven repositories
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << 'EOF'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <servers>
+              <server>
+                <id>github-firefly-operationos</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.PACKAGES_TOKEN}</password>
+              </server>
+              <server>
+                <id>github-fireflyframework</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.PACKAGES_TOKEN}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>github-packages</id>
+                <repositories>
+                  <repository>
+                    <id>github-firefly-operationos</id>
+                    <url>https://maven.pkg.github.com/firefly-operationOS/idp-backend-parent</url>
+                    <snapshots><enabled>true</enabled></snapshots>
+                    <releases><enabled>true</enabled></releases>
+                  </repository>
+                  <repository>
+                    <id>github-fireflyframework</id>
+                    <url>https://maven.pkg.github.com/fireflyframework/fireflyframework-parent</url>
+                    <snapshots><enabled>true</enabled></snapshots>
+                    <releases><enabled>true</enabled></releases>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>github-packages</activeProfile>
+            </activeProfiles>
+          </settings>
+          EOF
+
+      - name: Extract image metadata
+        id: meta
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          ARTIFACT=$(mvn -pl "$WEB_MODULE" help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/firefly-operationos/$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Build dependencies
+        run: mvn -B -U -pl "$WEB_MODULE" -am install -Dmaven.test.skip=true -DskipOpenApiGen
+
+      - name: Build container image
+        run: |
+          mvn -B -pl "$WEB_MODULE" \
+            spring-boot:build-image \
+            -Pbuild-image \
+            -Dmaven.test.skip=true \
+            -Ddocker.image.platform="$IMAGE_PLATFORM"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push container image
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          docker push "${IMAGE}:${VERSION}"
+          docker push "${IMAGE}:latest"
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          {
+            echo "### Container Image Published"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Image | \`${IMAGE}\` |"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Platform | \`${IMAGE_PLATFORM}\` |"
+            echo "| Tags | \`${VERSION}\`, \`latest\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
